@@ -1,9 +1,0 @@
-
- ⛅️ wrangler 4.124.0 (update available 4.138.0)
-───────────────────────────────────────────────
-Total Upload: 7.62 KiB / gzip: 2.23 KiB
-Uploaded gh (1.31 sec)
-Deployed gh triggers (1.94 sec)
-  gh.example.xyz/* (zone name: example.xyz)
-  *-gh.example.xyz/* (zone name: example.xyz)
-Current Version ID: 830b5edb-a905-4229-b602-dd7313a7361b

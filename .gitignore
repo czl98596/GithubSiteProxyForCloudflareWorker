@@ -1,5 +1,11 @@
 .spec-workflow/
 
+# 依赖目录
+node_modules/
+
 # 检验脚本运行时自动生成的入口副本
 verify/index.cjs
 verify/snippet.mjs
+
+# 检验结果快照（可随时重新生成，不入库）
+verify/*-final.txt

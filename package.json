@@ -1,0 +1,12 @@
+{
+  "name": "github-site-proxy-for-cloudflare-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "基于 Cloudflare Workers 的 GitHub 反向代理：通过 <原生域名>-gh.<后缀> 与 gh.<后缀> 访问 GitHub 资源",
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "verify:logic": "node verify/logic-test.mjs",
+    "verify:live": "node verify/remote-test.mjs"
+  }
+}
