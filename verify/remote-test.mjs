@@ -114,11 +114,12 @@ async function reqRetry(url, tries = 3) {
   } catch (e) {}
   console.log('CASE6 status=' + res.status + ' full_name=' + (json && json.full_name));
   check('6a api 子域可达（200，或 403 GitHub 匿名限流）', res.status === 200 || res.status === 403, String(res.status));
-  check(
-    '6b 200 时字段正确 / 403 时为限流提示',
-    json ? json.full_name === 'octocat/Hello-World' : /rate limit/i.test(text),
-    text.slice(0, 120)
-  );
+  // 注意：限流响应同样是合法 JSON，因此必须先按状态码分支，不能只看 JSON.parse 是否成功
+  if (res.status === 200) {
+    check('6b 200 时字段正确', !!json && json.full_name === 'octocat/Hello-World', text.slice(0, 120));
+  } else {
+    check('6b 403 时为 GitHub 限流提示', /rate limit/i.test(text), text.slice(0, 120));
+  }
 }
 
 // 7. avatars 子域（二进制透传）
