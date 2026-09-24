@@ -1,1 +1,5 @@
 .spec-workflow/
+
+# 检验脚本运行时自动生成的入口副本
+verify/index.cjs
+verify/snippet.mjs

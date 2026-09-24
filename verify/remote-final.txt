@@ -1,0 +1,49 @@
+CASE1 status=200 type=text/html; charset=utf-8 bytes=579184
+CASE1 proxied_refs=227 raw_github_refs=0
+PASS  1a gh. 入口首页 200
+PASS  1b 首页为 HTML
+PASS  1c 链接已改写为 gh.<域名>
+PASS  1d 无残留原始 github.com 链接
+PASS  1e 未残留 content-length
+PASS  1f CORS 头已注入
+PASS  1g 返回的是 GitHub 首页
+CASE2 status=200 title=GitHub - octocat/Hello-World: My first repository on GitHub! · GitHub
+PASS  2a 仓库页 200
+PASS  2b 仓库页含 gh.<域名> 引用
+PASS  2c 仓库标题正确
+CASE3 status=302 location=https://gh.example.xyz/octocat/Hello-World/releases
+PASS  3a 上游重定向被透传
+PASS  3b location 改写为 gh.<域名>（非 github.com）
+CASE4 status=302 location=https://raw-githubusercontent-com-gh.example.xyz/octocat/Hello-World/master/README
+PASS  4a raw 重定向被透传
+PASS  4b location 改写为 raw-...-gh.<域名>
+CASE5 status=200 body="Hello World!\n"
+PASS  5a raw 子域 200
+PASS  5b 内容为 README 正文
+CASE6 status=200 full_name=octocat/Hello-World
+PASS  6a api 子域可达（200，或 403 GitHub 匿名限流）
+PASS  6b 200 时字段正确 / 403 时为限流提示
+CASE7 status=200 type=image/png bytes=26186
+PASS  7a avatars 子域 200
+PASS  7b 返回图片二进制
+CASE8 status=200 bytes=87533
+PASS  8a jsdelivr 映射 200
+PASS  8b JS 内容非空
+PASS  9a 未知映射 404
+PASS  9b 404 提示 Target lookup failed
+CASE10 status=522 cors=null
+PASS  10a 未进入 Worker（无 CORS 头）
+PASS  10b 响应体不含代理改写痕迹
+CASE11 status=302 location=https://gh.example.xyz/octocat/Hello-World
+PASS  11a http 被重定向到 https
+CASE12 status=400
+PASS  12a 嵌套路径未导致 5xx
+CASE13 status=200 rewritten=240
+PASS  13a 旧入口仍 200
+PASS  13b 旧入口输出统一为 gh.<域名>
+CASE14 status=302 location=https://codeload-github-com-gh.example.xyz/octocat/Hello-World/zip/refs/heads/master
+PASS  14a 压缩包重定向改写为 codeload-...-gh.<域名>
+CASE14 download status=200 type=application/zip bytes=351
+PASS  14b 经代理下载到真实 zip（PK 头）
+
+RESULT pass=32 fail=0

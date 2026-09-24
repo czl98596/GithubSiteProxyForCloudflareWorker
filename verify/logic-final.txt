@@ -1,0 +1,67 @@
+
+=== src/index.js (service-worker) ===
+PASS  1a upstream host -> github.com
+PASS  1b upstream path preserved
+PASS  1c status 200
+PASS  1d github.com 链接改写为 gh.<后缀>
+PASS  1e rewrite protocol-relative avatars
+PASS  1f rewrite githubassets
+PASS  1g content-length removed
+PASS  1h cors header set
+PASS  2a raw upstream mapping
+PASS  3a unconfigured host -> 404
+PASS  3b no upstream call
+PASS  4a 302 passthrough
+PASS  4b location rewritten
+PASS  5a nested latest-commit truncated
+PASS  6a US -> 302
+PASS  6b US -> raw github.com
+PASS  6c US -> no upstream call
+PASS  7a CN -> proxied 200
+PASS  7b CN -> upstream github.com
+PASS  8a http -> redirect
+PASS  8b http -> https location
+PASS  9a binary passthrough
+PASS  11a gh. 前缀 -> github.com
+PASS  11b gh. 入口 200
+PASS  11c gh. 入口链接自洽
+PASS  11d gh. 入口下子域仍用 -gh. 形式
+PASS  12a gh. 入口 location 改写
+PASS  13a gh. 入口 US 回源 github.com
+PASS  14a gh. 入口 http -> https
+PASS  15a 旧 -gh. 入口仍映射 github.com
+
+=== src/snippet.js (module) ===
+PASS  1a upstream host -> github.com
+PASS  1b upstream path preserved
+PASS  1c status 200
+PASS  1d github.com 链接改写为 gh.<后缀>
+PASS  1e rewrite protocol-relative avatars
+PASS  1f rewrite githubassets
+PASS  1g content-length removed
+PASS  1h cors header set
+PASS  2a raw upstream mapping
+PASS  3a unconfigured host -> 404
+PASS  3b no upstream call
+PASS  4a 302 passthrough
+PASS  4b location rewritten
+PASS  5a nested latest-commit truncated
+PASS  6a US -> 302
+PASS  6b US -> raw github.com
+PASS  6c US -> no upstream call
+PASS  7a CN -> proxied 200
+PASS  7b CN -> upstream github.com
+PASS  8a http -> redirect
+PASS  8b http -> https location
+PASS  9a binary passthrough
+PASS  10a analytics script injected
+PASS  11a gh. 前缀 -> github.com
+PASS  11b gh. 入口 200
+PASS  11c gh. 入口链接自洽
+PASS  11d gh. 入口下子域仍用 -gh. 形式
+PASS  12a gh. 入口 location 改写
+PASS  13a gh. 入口 US 回源 github.com
+PASS  14a gh. 入口 http -> https
+PASS  15a 旧 -gh. 入口仍映射 github.com
+
+RESULT pass=61 fail=0

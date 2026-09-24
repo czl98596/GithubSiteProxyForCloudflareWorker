@@ -19,7 +19,11 @@ const domain_whitelist = [
   'api.npms.io',
   'github.community',
   'desktop.github.com',
-  'central.github.com'
+  'central.github.com',
+  // 代码压缩包 / Release 资源下载相关域名
+  'codeload.github.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com'
 ];
 
 // 由白名单自动生成映射
@@ -55,19 +59,8 @@ async function handleRequest(request) {
       // 提取原始GitHub域名
       const host_prefix = getProxyPrefix(effective_host);
       if (host_prefix) {
-        let target_host = null;
-        if (host_prefix && host_prefix.endsWith('-gh.')) {
-          const prefix_part = host_prefix.slice(0, -4);
-          for (const original of Object.keys(domain_mappings)) {
-            const normalized_original = original.trim().toLowerCase();
-            if (normalized_original.replace(/\./g, '-') === prefix_part) {
-              target_host = original;
-              break;
-            }
-          }
-        }
+        const target_host = resolveTargetHost(host_prefix);
         if (target_host) {
-          const domain_suffix = effective_host.substring(host_prefix.length);
           const original_url = new URL(request.url);
           original_url.host = target_host;
           original_url.protocol = 'https:';
@@ -95,20 +88,7 @@ async function handleRequest(request) {
   }
 
   // 根据前缀找到对应的原始域名
-  let target_host = null;
-  
-  // 解析 *-gh. 模式
-  if (host_prefix && host_prefix.endsWith('-gh.')) {
-    const prefix_part = host_prefix.slice(0, -4); // 移除 -gh.
-    // 尝试找到对应的原始域名
-    for (const original of Object.keys(domain_mappings)) {
-      const normalized_original = original.trim().toLowerCase();
-      if (normalized_original.replace(/\./g, '-') === prefix_part) {
-        target_host = original;
-        break;
-      }
-    }
-  }
+  const target_host = resolveTargetHost(host_prefix);
 
   if (!target_host) {
     return new Response(`Domain not configured for proxy. Host: ${effective_host}, Prefix: ${host_prefix}, Target lookup failed`, { status: 404 });
@@ -201,11 +181,42 @@ async function handleRequest(request) {
 }
 
 // 获取当前主机名的前缀，用于匹配反向映射
+// 支持两种入口：gh.<后缀>（github.com 主站，README 约定）与 <原生域名>-gh.<后缀>
 function getProxyPrefix(host) {
   // 检查 *-gh. 模式
   const ghMatch = host.match(/^([a-z0-9-]+-gh\.)/);
   if (ghMatch) {
     return ghMatch[1];
+  }
+
+  // 检查 gh. 模式
+  if (host.startsWith('gh.')) {
+    return 'gh.';
+  }
+
+  return null;
+}
+
+// 根据代理前缀解析出对应的原生 GitHub 域名
+function resolveTargetHost(host_prefix) {
+  if (!host_prefix) {
+    return null;
+  }
+
+  // gh.<后缀> 固定对应 github.com
+  if (host_prefix === 'gh.') {
+    return 'github.com';
+  }
+
+  // 解析 *-gh. 模式
+  if (host_prefix.endsWith('-gh.')) {
+    const prefix_part = host_prefix.slice(0, -4); // 移除 -gh.
+    for (const original of Object.keys(domain_mappings)) {
+      const normalized_original = original.trim().toLowerCase();
+      if (normalized_original.replace(/\./g, '-') === prefix_part) {
+        return original;
+      }
+    }
   }
 
   return null;
@@ -220,8 +231,8 @@ async function modifyText(text, host_prefix, effective_hostname) {
   for (const [original_domain, _] of Object.entries(domain_mappings)) {
     const escaped_domain = original_domain.replace(/\./g, '\\.');
     
-    // 统一为 [原生域名]-gh.072103.xyz
-    const current_prefix = original_domain.replace(/\./g, '-') + '-gh.';
+    // github.com 使用 README 约定的 gh.<后缀>，其余域名使用 [原生域名]-gh.<后缀>
+    const current_prefix = original_domain === 'github.com' ? 'gh.' : original_domain.replace(/\./g, '-') + '-gh.';
     const full_proxy_domain = `${current_prefix}${domain_suffix}`;
     
     // 替换完整URLs
@@ -248,7 +259,7 @@ function modifyUrl(url_str, host_prefix, effective_hostname) {
     
     for (const [original_domain, _] of Object.entries(domain_mappings)) {
       if (url.host === original_domain) {
-        const current_prefix = original_domain.replace(/\./g, '-') + '-gh.';
+        const current_prefix = original_domain === 'github.com' ? 'gh.' : original_domain.replace(/\./g, '-') + '-gh.';
         url.host = `${current_prefix}${domain_suffix}`;
         break;
       }
