@@ -37,6 +37,11 @@ const redirect_paths = [];
 // 中国大陆以外的地区重定向到原始GitHub域名
 const enable_geo_redirect = true;
 
+// 文件下载类链接（release 资产 / 源码包 / raw 文件）改走独立下载代理，生成形式：
+//   https://g.<后缀>/https://github.com/owner/repo/releases/download/...
+// 依赖同一后缀下 g.<后缀> 上部署的 gh-proxy；设为 null 即关闭，回退为全部走本 Worker
+const download_proxy_prefix = 'g.';
+
 export default {
   async fetch(request, env, ctx) {
     return handleRequest(request);
@@ -256,6 +261,60 @@ async function modifyText(text, host_prefix, effective_hostname) {
       `//${full_proxy_domain}`
     );
   }
+
+  // 文件下载类链接改走独立下载代理
+  // 必须在域名替换之后执行：改写结果里含有 github.com 字样，顺序颠倒会被二次替换
+  if (download_proxy_prefix) {
+    text = rewriteDownloadLinks(text, domain_suffix, download_proxy_prefix);
+  }
+
+  return text;
+}
+
+// 转义正则元字符
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 只有这些路径属于"文件下载"，才交给下载代理。
+// 刻意不含 /releases/tag/、/releases/expanded_assets/、/blob/ 等页面路径：
+// gh-proxy 对页面只做透传、不改写其中链接，且会把 /blob/ 当成 /raw/ 返回纯文本。
+const download_path_prefix = '(?:releases/(?:latest/)?download/|archive/|raw/)';
+
+// URL 终止边界：空白、双/单引号、尖括号、反引号、右圆括号、右方括号
+const url_tail_pattern = '[^\\s"\'<>\\u0060)\\]]*';
+
+// 把已改写为代理域名的下载链接，再改写为 https://g.<后缀>/https://<原始完整URL>
+function rewriteDownloadLinks(text, domain_suffix, dl_prefix) {
+  const dl_host = `${dl_prefix}${domain_suffix}`;
+  const suffix = escapeRegExp(domain_suffix);
+  const segment = '[^/\\s"\'<>\\u0060)\\]]+';
+  // 完整下载路径（含 releases/download、archive、raw 前缀），必须整体捕获后原样拼回
+  const download_path_pattern = `(?:${download_path_prefix})${url_tail_pattern}`;
+
+  // 1) github.com 的文件类链接（此时已改写为 gh.<后缀>，可能带协议或为协议相对）
+  text = text.replace(
+    new RegExp(`(?:https?:)?//gh\\.${suffix}/(${segment})/(${segment})/(${download_path_pattern})`, 'g'),
+    (match, owner, repo, dl_path) => `https://${dl_host}/https://github.com/${owner}/${repo}/${dl_path}`
+  );
+
+  // 2) raw.githubusercontent.com
+  text = text.replace(
+    new RegExp(`(?:https?:)?//raw-githubusercontent-com-gh\\.${suffix}/(${url_tail_pattern})`, 'g'),
+    (match, rest) => `https://${dl_host}/https://raw.githubusercontent.com/${rest}`
+  );
+
+  // 3) gist.githubusercontent.com
+  text = text.replace(
+    new RegExp(`(?:https?:)?//gist-githubusercontent-com-gh\\.${suffix}/(${url_tail_pattern})`, 'g'),
+    (match, rest) => `https://${dl_host}/https://gist.githubusercontent.com/${rest}`
+  );
+
+  // 4) HTML 中的相对路径链接（release 资产列表是异步片段，其中只有相对路径、没有域名）
+  text = text.replace(
+    new RegExp(`(href|src)=(["'])/(${segment})/(${segment})/(${download_path_pattern})\\2`, 'g'),
+    (match, attr, quote, owner, repo, dl_path) => `${attr}=${quote}https://${dl_host}/https://github.com/${owner}/${repo}/${dl_path}${quote}`
+  );
 
   return text;
 }

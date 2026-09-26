@@ -197,5 +197,44 @@ async function reqRetry(url, tries = 3) {
   }
 }
 
+// 15. release 页面里的下载链接应改写为 g.<域名>/https://github.com/...
+let dlSample = null;
+{
+  const res = await req('https://' + GH + '/clash-verge-rev/clash-verge-rev/releases/tag/v2.5.6');
+  const text = await res.text();
+  const gLinks = [...new Set(text.match(/https:\/\/g\.example\.xyz\/https:\/\/github\.com\/[^\s"'<>]*releases\/download\/[^\s"'<>]*/g) || [])];
+  const ghLinks = [...new Set(text.match(/https:\/\/gh\.example\.xyz\/[^\s"'<>]*releases\/download\/[^\s"'<>]*/g) || [])];
+  console.log('CASE15 status=' + res.status + ' gLinks=' + gLinks.length + ' ghLinks=' + ghLinks.length);
+  if (gLinks[0]) console.log('   sample=' + gLinks[0]);
+  check('15a release 页面 200', res.status === 200, String(res.status));
+  check('15b 页面内下载链接已是 g. 形式', gLinks.length > 0, String(gLinks.length));
+  check('15c 页面内不再残留 gh. 形式下载链接', ghLinks.length === 0, String(ghLinks.length));
+  dlSample = gLinks[0] || null;
+}
+
+// 16. 异步资产片段（下载按钮的真实来源）里的相对链接也必须改写
+{
+  const res = await req('https://' + GH + '/clash-verge-rev/clash-verge-rev/releases/expanded_assets/v2.5.6');
+  const text = await res.text();
+  const relLeft = (text.match(/href="\/clash-verge-rev\/clash-verge-rev\/releases\/download\//g) || []).length;
+  const gLinks = [...new Set(text.match(/href="https:\/\/g\.example\.xyz\/https:\/\/github\.com\/[^"]*releases\/download\/[^"]*"/g) || [])];
+  console.log('CASE16 status=' + res.status + ' remainingRelative=' + relLeft + ' rewritten=' + gLinks.length);
+  check('16a 资产片段 200', res.status === 200, String(res.status));
+  check('16b 相对下载链接已全部改写', relLeft === 0, String(relLeft));
+  check('16c 已改写为 g. 形式', gLinks.length > 0, String(gLinks.length));
+  if (!dlSample && gLinks[0]) dlSample = gLinks[0].slice(6, -1);
+}
+
+// 17. g. 形式链接可直连流式下载（gh-proxy 自动跟随上游 302，不暴露签名跳转）
+if (dlSample) {
+  const res = await req(dlSample, { headers: { Range: 'bytes=0-1023' } });
+  const buf = new Uint8Array(await res.arrayBuffer());
+  console.log('CASE17 status=' + res.status + ' bytes=' + buf.length + ' magic=' + buf[0] + ',' + buf[1]);
+  check('17a g. 链接返回 200/206', res.status === 200 || res.status === 206, String(res.status));
+  check('17b 内容为 PE 可执行文件（MZ 头）', buf[0] === 0x4d && buf[1] === 0x5a, buf[0] + ',' + buf[1]);
+} else {
+  check('17a 取得 g. 形式样本链接', false, 'no sample');
+}
+
 console.log('\nRESULT pass=' + pass + ' fail=' + fail);
 process.exit(fail === 0 ? 0 : 1);

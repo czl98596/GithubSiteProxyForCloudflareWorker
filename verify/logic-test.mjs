@@ -95,6 +95,20 @@ const HTML_BODY = [
   '</body></html>',
 ].join('');
 
+// 下载类链接样本：绝对 URL、相对 href，以及必须保持 gh. 形式的页面链接
+const DOWNLOAD_BODY = [
+  '<a href="https://github.com/o/r/releases/download/v1/a.exe">abs</a>',
+  '<a href="/o/r/releases/download/v1/b.exe">rel</a>',
+  '<a href="https://github.com/o/r/releases/latest/download/c.exe">latest</a>',
+  '<a href="https://github.com/o/r/archive/refs/tags/v1.zip">zip</a>',
+  '<a href="https://github.com/o/r/raw/main/file.txt">rawpath</a>',
+  '<a href="https://github.com/o/r/blob/main/README.md">blob</a>',
+  '<a href="https://github.com/o/r/releases/tag/v1">tagpage</a>',
+  '<a href="https://github.com/o/r/issues">issues</a>',
+  '<img src="https://raw.githubusercontent.com/o/r/main/logo.png">',
+  '<a href="https://gist.githubusercontent.com/u/1/raw/x.txt">gist</a>',
+].join('');
+
 const handlers = await loadHandlers();
 
 for (const h of handlers) {
@@ -230,6 +244,21 @@ for (const h of handlers) {
   {
     const { res, calls } = await runCase(h, 'https://github-com-gh.example.com/octocat/Hello-World', { body: 'ok', contentType: 'text/plain' });
     check('15a 旧 -gh. 入口仍映射 github.com', res.status === 200 && calls[0].url === 'https://github.com/octocat/Hello-World', String(res.status));
+  }
+
+  // 16. 下载类链接改写为 g.<后缀>/https://<原始完整URL>
+  {
+    const { text } = await runCase(h, 'https://gh.example.com/o/r/releases/tag/v1', { body: DOWNLOAD_BODY });
+    check('16a 绝对 release 资产 -> g. 形式', text.includes('https://g.example.com/https://github.com/o/r/releases/download/v1/a.exe'), text.slice(0, 300));
+    check('16b 相对 href 也 -> g. 形式', text.includes('href="https://g.example.com/https://github.com/o/r/releases/download/v1/b.exe"'), text.slice(0, 300));
+    check('16c latest/download -> g. 形式', text.includes('https://g.example.com/https://github.com/o/r/releases/latest/download/c.exe'), text.slice(0, 400));
+    check('16d archive 源码包 -> g. 形式', text.includes('https://g.example.com/https://github.com/o/r/archive/refs/tags/v1.zip'), text.slice(0, 400));
+    check('16e github.com/raw/ 文件 -> g. 形式', text.includes('https://g.example.com/https://github.com/o/r/raw/main/file.txt'), text.slice(0, 500));
+    check('16f raw.githubusercontent.com -> g. 形式', text.includes('https://g.example.com/https://raw.githubusercontent.com/o/r/main/logo.png'), text.slice(0, 500));
+    check('16g gist.githubusercontent.com -> g. 形式', text.includes('https://g.example.com/https://gist.githubusercontent.com/u/1/raw/x.txt'), text.slice(0, 600));
+    check('16h release 页面链接保持 gh. 形式', text.includes('href="https://gh.example.com/o/r/releases/tag/v1"'), text.slice(0, 600));
+    check('16i blob 页面保持 gh. 形式', text.includes('href="https://gh.example.com/o/r/blob/main/README.md"') && !text.includes('g.example.com/https://github.com/o/r/blob/'), text.slice(0, 600));
+    check('16j issues 等页面保持 gh. 形式', text.includes('href="https://gh.example.com/o/r/issues"'), text.slice(0, 600));
   }
 }
 
