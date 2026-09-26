@@ -1,7 +1,16 @@
-/** 线上端到端检验：请求已部署的 Worker，验证映射、内容改写、重定向与边界行为。 */
-const BASE = 'example.com';
+/** 线上端到端检验：请求已部署的 Worker，验证映射、内容改写、重定向与边界行为。
+ *
+ *  用法：PROXY_DOMAIN=<你的域名> node verify/remote-test.mjs
+ *  未设置 PROXY_DOMAIN 时用 example.com 占位，仅能检查脚本本身，无法真正连通。 */
+const BASE = process.env.PROXY_DOMAIN || 'example.com';
 const GH = 'gh.' + BASE; // README 约定入口（github.com 主站）
 const GH_LEGACY = 'github-com-gh.' + BASE; // 兼容入口
+const G_HOST = 'g.' + BASE; // 下载代理入口（gh-proxy）
+
+// 供动态构造正则使用（仓库里不硬编码任何真实域名）
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const GH_RE = escapeRe(GH);
+const G_HOST_RE = escapeRe(G_HOST);
 
 let pass = 0;
 let fail = 0;
@@ -54,7 +63,7 @@ async function reqRetry(url, tries = 3) {
   const res = await reqRetry('https://' + GH + '/');
   const text = await res.text();
   console.log('CASE1 status=' + res.status + ' type=' + res.headers.get('content-type') + ' bytes=' + text.length);
-  const proxied = (text.match(/gh\.example\.xyz/g) || []).length;
+  const proxied = (text.match(new RegExp(GH_RE, 'g')) || []).length;
   const raw = (text.match(/https:\/\/github\.com(?=[/"'\s])/g) || []).length;
   console.log('CASE1 proxied_refs=' + proxied + ' raw_github_refs=' + raw);
   check('1a gh. 入口首页 200', res.status === 200, String(res.status));
@@ -155,7 +164,7 @@ async function reqRetry(url, tries = 3) {
   const text = await res.text();
   console.log('CASE10 status=' + res.status + ' cors=' + res.headers.get('access-control-allow-origin'));
   check('10a 未进入 Worker（无 CORS 头）', res.headers.get('access-control-allow-origin') === null, String(res.headers.get('access-control-allow-origin')));
-  check('10b 响应体不含代理改写痕迹', !/gh\.example\.xyz/.test(text), 'len=' + text.length);
+  check('10b 响应体不含代理改写痕迹', !new RegExp(GH_RE).test(text), 'len=' + text.length);
 }
 
 // 11. HTTP -> HTTPS 强制升级
@@ -177,7 +186,7 @@ async function reqRetry(url, tries = 3) {
 {
   const res = await req('https://' + GH_LEGACY + '/octocat/Hello-World');
   const text = await res.text();
-  const rewritten = (text.match(/gh\.example\.xyz/g) || []).length;
+  const rewritten = (text.match(new RegExp(GH_RE, 'g')) || []).length;
   console.log('CASE13 status=' + res.status + ' rewritten=' + rewritten);
   check('13a 旧入口仍 200', res.status === 200, String(res.status));
   check('13b 旧入口输出统一为 gh.<域名>', rewritten > 0, String(rewritten));
@@ -202,8 +211,8 @@ let dlSample = null;
 {
   const res = await req('https://' + GH + '/clash-verge-rev/clash-verge-rev/releases/tag/v2.5.6');
   const text = await res.text();
-  const gLinks = [...new Set(text.match(/https:\/\/g\.example\.xyz\/https:\/\/github\.com\/[^\s"'<>]*releases\/download\/[^\s"'<>]*/g) || [])];
-  const ghLinks = [...new Set(text.match(/https:\/\/gh\.example\.xyz\/[^\s"'<>]*releases\/download\/[^\s"'<>]*/g) || [])];
+  const gLinks = [...new Set(text.match(new RegExp('https://' + G_HOST_RE + '/https://github\\.com/[^\\s"\'<>]*releases/download/[^\\s"\'<>]*', 'g')) || [])];
+  const ghLinks = [...new Set(text.match(new RegExp('https://' + GH_RE + '/[^\\s"\'<>]*releases/download/[^\\s"\'<>]*', 'g')) || [])];
   console.log('CASE15 status=' + res.status + ' gLinks=' + gLinks.length + ' ghLinks=' + ghLinks.length);
   if (gLinks[0]) console.log('   sample=' + gLinks[0]);
   check('15a release 页面 200', res.status === 200, String(res.status));
@@ -217,7 +226,7 @@ let dlSample = null;
   const res = await req('https://' + GH + '/clash-verge-rev/clash-verge-rev/releases/expanded_assets/v2.5.6');
   const text = await res.text();
   const relLeft = (text.match(/href="\/clash-verge-rev\/clash-verge-rev\/releases\/download\//g) || []).length;
-  const gLinks = [...new Set(text.match(/href="https:\/\/g\.example\.xyz\/https:\/\/github\.com\/[^"]*releases\/download\/[^"]*"/g) || [])];
+  const gLinks = [...new Set(text.match(new RegExp('href="https://' + G_HOST_RE + '/https://github\\.com/[^"]*releases/download/[^"]*"', 'g')) || [])];
   console.log('CASE16 status=' + res.status + ' remainingRelative=' + relLeft + ' rewritten=' + gLinks.length);
   check('16a 资产片段 200', res.status === 200, String(res.status));
   check('16b 相对下载链接已全部改写', relLeft === 0, String(relLeft));

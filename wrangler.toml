@@ -2,11 +2,9 @@ name = "gh"
 main = "src/index.js"
 compatibility_date = "2024-04-06"
 
-# 代理入口：gh.example.com（github.com 主站，与 README 一致）
-# 以及 <原生域名>-gh.example.com（例如 raw-githubusercontent-com-gh.example.com）
-routes = [
-  { pattern = "gh.example.com/*", zone_name = "example.com" },
-  { pattern = "*-gh.example.com/*", zone_name = "example.com" }
-]
+# 路由不在仓库中声明：请在 Cloudflare Dashboard 的
+#   Worker → Settings → Domains & Routes 里自行添加两条路由：
+#   gh.<你的域名>/*      （github.com 主站入口）
+#   *-gh.<你的域名>/*    （各子域入口，如 raw-githubusercontent-com-gh.<你的域名>）
 
 
