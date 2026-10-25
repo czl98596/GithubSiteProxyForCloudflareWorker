@@ -44,11 +44,32 @@ const enable_geo_redirect = true;
 // 依赖同一后缀下 g.<后缀> 上部署的 gh-proxy；设为 null 即关闭，回退为全部走本 Worker
 const download_proxy_prefix = 'g.';
 
+// 两个入口保持独立缓存；修改改写规则时递增版本，避免使用旧输出。
+const proxy_entry = 'index';
+const inject_analytics = false;
+const cache_version = 'v2';
+const fresh_seconds = 30;
+const hard_seconds = 60;
+const max_cache_bytes = 8 * 1024 * 1024;
+const refreshes = new Set(); // 只保存键，不在请求之间共享 Response 或 I/O Promise。
+const ignored_cache_headers = new Set([
+  'cf-ray', 'cf-connecting-ip', 'cf-connecting-ipv6', 'cf-ipcountry',
+  'cf-visitor', 'x-forwarded-for', 'x-real-ip', 'true-client-ip',
+  'connection', 'keep-alive', 'transfer-encoding',
+]);
+const domain_patterns = domain_whitelist.map(domain => ({
+  domain,
+  prefix: domain === 'github.com' ? 'gh.' : domain.replace(/\./g, '-') + '-gh.',
+  absolute: new RegExp(`https?://${domain.replace(/\./g, '\\.')}\\b(?=/|"|'|\\s|$)`, 'g'),
+  relative: new RegExp(`//${domain.replace(/\./g, '\\.')}\\b(?=/|"|'|\\s|$)`, 'g'),
+}));
+const download_patterns = new Map();
+
 addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request));
+  event.respondWith(handleRequest(event.request, event));
 });
 
-async function handleRequest(request) {
+async function handleRequest(request, context) {
   const url = new URL(request.url);
   // 统一转小写
   const current_host = url.host.toLowerCase();
@@ -119,15 +140,13 @@ async function handleRequest(request) {
   const new_headers = new Headers(request.headers);
   new_headers.set('Host', target_host);
   new_headers.set('Referer', new_url.href);
-  // 强制要求源站返回未压缩的内容，确保我们可以正常修改文本
-  new_headers.delete('accept-encoding');
-  
-  try {
-    // 发起请求
+  // 保留压缩协商；仅在实际改写正文时移除原来的编码/长度/校验头。
+  const load = async () => {
+    const started = Date.now();
     const response = await fetch(new_url.href, {
       method: request.method,
       headers: new_headers,
-      body: request.method !== 'GET' ? request.body : undefined,
+      body: !['GET', 'HEAD'].includes(request.method) ? request.body : undefined,
       redirect: 'manual' // 处理重定向，避免自动跟随导致的问题
     });
 
@@ -138,10 +157,12 @@ async function handleRequest(request) {
         const modified_location = modifyUrl(location, host_prefix, effective_host);
         const new_res_headers = new Headers(response.headers);
         new_res_headers.set('location', modified_location);
-        return new Response(null, {
+        const control = new_res_headers.get('cache-control');
+        new_res_headers.set('cache-control', control ? `${control}, no-cache` : 'no-cache');
+        return { response: new Response(null, {
           status: response.status,
           headers: new_res_headers
-        });
+        }), policy: null };
       }
     }
 
@@ -149,39 +170,69 @@ async function handleRequest(request) {
     const new_response_headers = new Headers(response.headers);
     new_response_headers.set('access-control-allow-origin', '*');
     new_response_headers.set('access-control-allow-credentials', 'true');
-    new_response_headers.set('cache-control', 'public, max-age=14400');
     new_response_headers.delete('content-security-policy');
     new_response_headers.delete('content-security-policy-report-only');
     new_response_headers.delete('clear-site-data');
 
     // 只处理 200 OK 且是文本类型的响应内容
-    const content_type = response.headers.get('content-type') || '';
+    const content_type = (response.headers.get('content-type') || '').toLowerCase();
+    const policy = cachePolicy(response, new_url, started);
+    // 页面/可变资源每次向代理重验证，避免两层缓存叠加超过一分钟。
+    if (!policy?.immutable && !/\bno-cache\b/i.test(new_response_headers.get('cache-control') || '')) {
+      const original = new_response_headers.get('cache-control');
+      new_response_headers.set('cache-control', original ? `${original}, no-cache` : 'no-cache');
+    }
     const is_text = content_type.includes('text/') || 
                     content_type.includes('application/json') || 
                     content_type.includes('application/javascript') || 
                     content_type.includes('application/xml');
 
-    if (response.status === 200 && is_text) {
+    if (response.status === 200 && is_text && request.method !== 'HEAD') {
       // 如果要修改内容，必须移除这些头，因为内容会被解压且长度会变化
       new_response_headers.delete('content-encoding');
       new_response_headers.delete('content-length');
+      new_response_headers.delete('etag');
+      new_response_headers.delete('content-md5');
+      new_response_headers.delete('digest');
+      // 原始 CDN 缓存指令属于源站表示，不能套在改写后的响应上。
+      new_response_headers.delete('cdn-cache-control');
+      new_response_headers.delete('cloudflare-cdn-cache-control');
+
+      if (content_type.includes('text/html') && typeof HTMLRewriter !== 'undefined') {
+        // 先将原 Response（含编码信息）交给解析器，再清理改写后输出的头。
+        const transformed = rewriteHtml(response, host_prefix, effective_host);
+        return { response: new Response(transformed.body, {
+          status: response.status, headers: new_response_headers,
+        }), policy };
+      }
       
       let text = await response.text();
       text = await modifyText(text, host_prefix, effective_host);
+      // Node 逻辑检查没有 HTMLRewriter；真实 Workers 总是使用上面的流式分支。
+      if (inject_analytics && content_type.includes('text/html')) {
+        text = injectAnalytics(text);
+      }
       
-      return new Response(text, {
+      return { response: new Response(text, {
         status: response.status,
         headers: new_response_headers
-      });
+      }), policy };
     }
 
     // 对于非文本或非 200 响应，直接返回原始流
-    return new Response(response.body, {
+    return { response: new Response(request.method === 'HEAD' ? null : response.body, {
       status: response.status,
       headers: new_response_headers
-    });
+    }), policy };
+  };
+
+  try {
+    return await withCache(request, new_headers, effective_host, context, load);
   } catch (err) {
-    return new Response(`Proxy Error: ${err.message}`, { status: 502 });
+    return new Response(`Proxy Error: ${err.message}`, {
+      status: 502,
+      headers: { 'cache-control': 'no-store' },
+    });
   }
 }
 
@@ -228,29 +279,15 @@ function resolveTargetHost(host_prefix) {
 }
 
 // 修改文本中的域名引用
-async function modifyText(text, host_prefix, effective_hostname) {
+function modifyText(text, host_prefix, effective_hostname) {
   // 使用有效主机名获取域名后缀部分（用于构建完整的代理域名）
   const domain_suffix = effective_hostname.substring(host_prefix.length);
   
   // 替换所有域名引用
-  for (const [original_domain, _] of Object.entries(domain_mappings)) {
-    const escaped_domain = original_domain.replace(/\./g, '\\.');
-    
-    // github.com 使用 README 约定的 gh.<后缀>，其余域名使用 [原生域名]-gh.<后缀>
-    const current_prefix = original_domain === 'github.com' ? 'gh.' : original_domain.replace(/\./g, '-') + '-gh.';
-    const full_proxy_domain = `${current_prefix}${domain_suffix}`;
-    
-    // 替换完整URLs
-    text = text.replace(
-      new RegExp(`https?://${escaped_domain}(?=/|"|'|\\s|$)`, 'g'),
-      `https://${full_proxy_domain}`
-    );
-    
-    // 替换协议相对URLs
-    text = text.replace(
-      new RegExp(`//${escaped_domain}(?=/|"|'|\\s|$)`, 'g'),
-      `//${full_proxy_domain}`
-    );
+  for (const pattern of domain_patterns) {
+    const full_proxy_domain = `${pattern.prefix}${domain_suffix}`;
+    text = text.replace(pattern.absolute, `https://${full_proxy_domain}`);
+    text = text.replace(pattern.relative, `//${full_proxy_domain}`);
   }
 
   // 文件下载类链接改走独立下载代理
@@ -283,27 +320,39 @@ function rewriteDownloadLinks(text, domain_suffix, dl_prefix) {
   // 完整下载路径（含 releases/download、archive、raw 前缀），必须整体捕获后原样拼回
   const download_path_pattern = `(?:${download_path_prefix})${url_tail_pattern}`;
 
+  const pattern_key = `${dl_prefix}${domain_suffix}`;
+  let patterns = download_patterns.get(pattern_key);
+  if (!patterns) {
+    patterns = [
+      new RegExp(`(?:https?:)?//gh\\.${suffix}/(${segment})/(${segment})/(${download_path_pattern})`, 'g'),
+      new RegExp(`(?:https?:)?//raw-githubusercontent-com-gh\\.${suffix}/(${url_tail_pattern})`, 'g'),
+      new RegExp(`(?:https?:)?//gist-githubusercontent-com-gh\\.${suffix}/(${url_tail_pattern})`, 'g'),
+      new RegExp(`(href|src)=(["'])/(${segment})/(${segment})/(${download_path_pattern})\\2`, 'g'),
+    ];
+    if (download_patterns.size >= 64) download_patterns.delete(download_patterns.keys().next().value);
+    download_patterns.set(pattern_key, patterns);
+  }
   // 1) github.com 的文件类链接（此时已改写为 gh.<后缀>，可能带协议或为协议相对）
   text = text.replace(
-    new RegExp(`(?:https?:)?//gh\\.${suffix}/(${segment})/(${segment})/(${download_path_pattern})`, 'g'),
+    patterns[0],
     (match, owner, repo, dl_path) => `https://${dl_host}/https://github.com/${owner}/${repo}/${dl_path}`
   );
 
   // 2) raw.githubusercontent.com
   text = text.replace(
-    new RegExp(`(?:https?:)?//raw-githubusercontent-com-gh\\.${suffix}/(${url_tail_pattern})`, 'g'),
+    patterns[1],
     (match, rest) => `https://${dl_host}/https://raw.githubusercontent.com/${rest}`
   );
 
   // 3) gist.githubusercontent.com
   text = text.replace(
-    new RegExp(`(?:https?:)?//gist-githubusercontent-com-gh\\.${suffix}/(${url_tail_pattern})`, 'g'),
+    patterns[2],
     (match, rest) => `https://${dl_host}/https://gist.githubusercontent.com/${rest}`
   );
 
   // 4) HTML 中的相对路径链接（release 资产列表是异步片段，其中只有相对路径、没有域名）
   text = text.replace(
-    new RegExp(`(href|src)=(["'])/(${segment})/(${segment})/(${download_path_pattern})\\2`, 'g'),
+    patterns[3],
     (match, attr, quote, owner, repo, dl_path) => `${attr}=${quote}https://${dl_host}/https://github.com/${owner}/${repo}/${dl_path}${quote}`
   );
 
@@ -327,4 +376,252 @@ function modifyUrl(url_str, host_prefix, effective_hostname) {
   } catch (e) {
     return url_str;
   }
+}
+
+// HTML 属性由解析器完整交付；正文只在完整词元边界改写，避免跨网络分段截断 URL。
+function rewriteHtml(response, host_prefix, effective_host) {
+  const rewrite = value => modifyText(value, host_prefix, effective_host);
+  let pending = '';
+  let long_token = false;
+  let analytics_added = false;
+  const analytics = analyticsScript();
+  const rewriter = new HTMLRewriter().on('*', {
+    element(element) {
+      for (const [name, value] of [...element.attributes]) {
+        const wrapped = `${name}="${value}"`;
+        const modified = rewrite(wrapped);
+        if (modified !== wrapped) element.setAttribute(name, modified.slice(name.length + 2, -1));
+      }
+      if (inject_analytics && !analytics_added && ['head', 'body'].includes(element.tagName)) {
+        element.append(analytics, { html: true });
+        analytics_added = true;
+      }
+    },
+  }).onDocument({
+    text(chunk) {
+      pending += chunk.text;
+      let output = '';
+      if (long_token) {
+        const boundary = pending.search(/[\s"'<>`)\]]/);
+        if (boundary < 0 && !chunk.lastInTextNode) {
+          output = pending;
+          pending = '';
+        } else {
+          const end = boundary < 0 ? pending.length : boundary + 1;
+          output = pending.slice(0, end);
+          pending = pending.slice(end);
+          long_token = false;
+        }
+      }
+      if (!long_token) {
+        if (chunk.lastInTextNode) {
+          output += rewrite(pending);
+          pending = '';
+        } else {
+          let boundary = -1;
+          const boundaries = /[\s"'<>`)\]]/g;
+          for (const match of pending.matchAll(boundaries)) boundary = match.index;
+          if (boundary >= 0) {
+            output += rewrite(pending.slice(0, boundary + 1));
+            pending = pending.slice(boundary + 1);
+          }
+          // 超长无分隔词元不能是合法的代理 URL；直接输出，避免无限缓冲。
+          if (pending.length > 65536) {
+            output += pending;
+            pending = '';
+            long_token = true;
+          }
+        }
+      }
+      if (output) chunk.replace(output, { html: true });
+      else chunk.remove();
+      if (chunk.lastInTextNode) long_token = false;
+    },
+    comments(comment) {
+      const modified = rewrite(comment.text);
+      if (modified !== comment.text) comment.replace(`<!--${modified}-->`, { html: true });
+    },
+    end(end) {
+      if (inject_analytics && !analytics_added) end.append(analytics, { html: true });
+    },
+  });
+  return rewriter.transform(response);
+}
+
+function analyticsScript() {
+  return '<script defer src="https://u.2x.nz/script.js" data-website-id="e20f6781-b518-4bab-96be-35afe24cd0cf"></script>';
+}
+
+function injectAnalytics(text) {
+  const script = analyticsScript();
+  if (text.includes('</head>')) return text.replace('</head>', `${script}</head>`);
+  if (text.includes('</body>')) return text.replace('</body>', `${script}</body>`);
+  return text + script;
+}
+
+function cacheDirectives(value) {
+  const directives = new Map();
+  for (const part of (value || '').split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)) {
+    const separator = part.indexOf('=');
+    const name = (separator < 0 ? part : part.slice(0, separator)).trim().toLowerCase();
+    if (!name) continue;
+    const data = separator < 0 ? '' : part.slice(separator + 1).trim().replace(/^"(.*)"$/, '$1');
+    directives.set(name, directives.has(name) ? null : data);
+  }
+  return directives;
+}
+
+function requestCacheable(request) {
+  if (request.method !== 'GET') return false;
+  for (const header of ['cookie', 'authorization', 'proxy-authorization', 'range',
+    'cf-access-jwt-assertion', 'cf-access-client-secret', 'x-api-key']) {
+    if (request.headers.has(header)) return false;
+  }
+  const directives = cacheDirectives(request.headers.get('cache-control'));
+  if (directives.has('no-cache') || directives.has('no-store') || directives.get('max-age') === '0' ||
+      /\bno-cache\b/i.test(request.headers.get('pragma') || '')) return false;
+  for (const key of new URL(request.url).searchParams.keys()) {
+    if (/token|authorization|signature|credential|password|secret|jwt/i.test(key) ||
+        ['sig', 'auth', 'key', 'code'].includes(key.toLowerCase())) return false;
+  }
+  return true;
+}
+
+function cachePolicy(response, upstream_url, started) {
+  if (response.status !== 200 || response.headers.has('set-cookie')) return null;
+  const directives = cacheDirectives(response.headers.get('cache-control'));
+  if (['private', 'no-store', 'no-cache'].some(name => directives.has(name))) return null;
+  const vary = (response.headers.get('vary') || '').toLowerCase().split(',').map(name => name.trim());
+  if (vary.some(name => name === '*' || ignored_cache_headers.has(name))) return null;
+  const length = response.headers.get('content-length');
+  if (length !== null && Number(length) > max_cache_bytes) return null;
+  const now = Date.now();
+  const date = Date.parse(response.headers.get('date') || '');
+  const age_header = response.headers.get('age');
+  if (age_header !== null && !/^\d+$/.test(age_header)) return null;
+  const age = Math.max(Number(age_header || 0) * 1000 + (now - started), Number.isFinite(date) ? now - date : 0, 0);
+  const lifetime_value = directives.has('s-maxage') ? directives.get('s-maxage') : directives.get('max-age');
+  let remaining;
+  if (lifetime_value !== undefined) {
+    if (lifetime_value === null || !/^\d+$/.test(lifetime_value)) return null;
+    remaining = Number(lifetime_value) * 1000 - age;
+  } else {
+    const expires = Date.parse(response.headers.get('expires') || '');
+    if (!Number.isFinite(expires)) return null; // 不猜测 GitHub 是否允许缓存。
+    remaining = expires - (Number.isFinite(date) ? date : now) - age;
+  }
+  const type = (response.headers.get('content-type') || '').toLowerCase();
+  const immutable = directives.has('immutable') && !/html|json/.test(type) &&
+    /(?:^|[/._-])[a-f0-9]{8,64}(?=[/._-]|$)/i.test(upstream_url.pathname);
+  const hard = Math.floor(Math.min(remaining, immutable ? remaining : hard_seconds * 1000) / 1000) * 1000;
+  if (!Number.isFinite(hard) || hard < 1000) return null;
+  return { created: now, age, hard, soft: immutable ? hard : Math.min(fresh_seconds * 1000, hard), immutable };
+}
+
+async function cacheKey(request, upstream_headers, effective_host) {
+  // 包含所有影响上游表示的请求头，而非只猜测 Accept；因此 Vary 的变体不会串页。
+  const headers = [...upstream_headers].filter(([name]) => !ignored_cache_headers.has(name))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const source = JSON.stringify([request.url, effective_host, headers]);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+  const fingerprint = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const url = new URL(request.url);
+  url.host = effective_host;
+  url.searchParams.append('__gh_proxy_variant', fingerprint);
+  return new Request(url.href);
+}
+
+function stripCacheMetadata(headers) {
+  for (const name of [...headers.keys()]) {
+    if (name.startsWith('x-gh-proxy-internal-')) headers.delete(name);
+  }
+}
+
+function clientResponse(response, state, cached = false) {
+  const headers = new Headers(response.headers);
+  if (cached) {
+    const elapsed = Math.max(0, Date.now() - Number(headers.get('x-gh-proxy-internal-created')));
+    headers.set('cache-control', headers.get('x-gh-proxy-internal-client-control') || 'no-cache');
+    headers.set('date', headers.get('x-gh-proxy-internal-client-date'));
+    headers.set('age', String(Math.floor((Number(headers.get('x-gh-proxy-internal-origin-age')) + elapsed) / 1000)));
+  }
+  stripCacheMetadata(headers);
+  headers.set('x-proxy-cache', state);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+async function writeCache(cache, key, response, policy) {
+  const headers = new Headers(response.headers);
+  stripCacheMetadata(headers);
+  headers.set('x-gh-proxy-internal-created', String(policy.created));
+  headers.set('x-gh-proxy-internal-soft', String(policy.soft));
+  headers.set('x-gh-proxy-internal-hard', String(policy.hard));
+  headers.set('x-gh-proxy-internal-origin-age', String(policy.age));
+  headers.set('x-gh-proxy-internal-client-control', headers.get('cache-control') || 'no-cache');
+  headers.set('x-gh-proxy-internal-client-date', headers.get('date') || new Date(policy.created).toUTCString());
+  // 仅改变内部缓存副本的头；浏览器收到的是上面保存的重验证策略。
+  headers.set('date', new Date(policy.created).toUTCString());
+  headers.set('age', '0');
+  headers.set('cache-control', `public, max-age=${policy.hard / 1000}`);
+  headers.delete('expires');
+  headers.delete('content-length');
+  headers.delete('cdn-cache-control');
+  headers.delete('cloudflare-cdn-cache-control');
+  let bytes = 0;
+  const body = response.body?.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      bytes += chunk.byteLength;
+      if (bytes > max_cache_bytes) throw new Error('Cache body exceeds local limit');
+      controller.enqueue(chunk);
+    },
+  }));
+  // pipeThrough 不再携带原始流的编码标记；显式声明已压缩字节，防止缓存二次压缩。
+  await cache.put(key, new Response(body, {
+    status: 200, headers,
+    encodeBody: headers.has('content-encoding') ? 'manual' : 'automatic',
+  }));
+}
+
+async function withCache(request, upstream_headers, effective_host, context, load) {
+  const bypass = async () => clientResponse((await load()).response, 'BYPASS');
+  if (!requestCacheable(request) || typeof caches === 'undefined' || typeof context?.waitUntil !== 'function') {
+    return bypass();
+  }
+  let cache, key, cached;
+  try {
+    cache = await caches.open(`github-site-proxy-${cache_version}-${proxy_entry}`);
+    key = await cacheKey(request, upstream_headers, effective_host);
+    cached = await cache.match(key);
+  } catch {
+    return bypass(); // 缓存故障不能阻断浏览。
+  }
+  if (cached) {
+    const created = Number(cached.headers.get('x-gh-proxy-internal-created'));
+    const soft = Number(cached.headers.get('x-gh-proxy-internal-soft'));
+    const hard = Number(cached.headers.get('x-gh-proxy-internal-hard'));
+    const age = Date.now() - created;
+    if (created > 0 && age >= 0 && age < hard && soft > 0 && hard >= soft) {
+      if (age < soft) return clientResponse(cached, 'HIT', true);
+      if (!refreshes.has(key.url)) {
+        refreshes.add(key.url);
+        const update = (async () => {
+          const result = await load();
+          if (result.policy) await writeCache(cache, key, result.response, result.policy);
+          else {
+            // 5xx/限流不延长旧条目；变成私密、禁止缓存或 4xx 时立即作废。
+            if (result.response.status < 500 && result.response.status !== 429) await cache.delete(key);
+            await result.response.body?.cancel();
+          }
+        })().catch(() => {}).finally(() => refreshes.delete(key.url));
+        context.waitUntil(update);
+      }
+      return clientResponse(cached, 'STALE', true);
+    }
+    await cached.body?.cancel();
+  }
+  const result = await load();
+  if (result.policy) {
+    context.waitUntil(writeCache(cache, key, result.response.clone(), result.policy).catch(() => {}));
+  }
+  return clientResponse(result.response, result.policy ? 'MISS' : 'BYPASS');
 }

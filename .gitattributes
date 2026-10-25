@@ -1,0 +1,2 @@
+# Keep the original performance-test snapshots byte-identical, including their whitespace.
+verify/fixtures/baseline-*.js -text -whitespace

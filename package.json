@@ -7,6 +7,13 @@
     "dev": "npx wrangler dev",
     "deploy": "npx wrangler deploy",
     "verify:logic": "node verify/logic-test.mjs",
+    "verify:cache": "node verify/cache-test.mjs",
+    "verify:runtime": "node verify/runtime-test.mjs --report",
+    "verify:all": "node verify/sync-snippet.mjs --check && npm run verify:logic && npm run verify:cache && npm run verify:runtime",
+    "sync:snippet": "node verify/sync-snippet.mjs",
     "verify:live": "node verify/remote-test.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260730.0"
   }
 }
